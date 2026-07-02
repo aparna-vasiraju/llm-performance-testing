@@ -1,0 +1,268 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="Test Plan">
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments" testname="User Defined Variables">
+        <collectionProp name="Arguments.arguments"/>
+      </elementProp>
+    </TestPlan>
+    <hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Thread Group">
+        <intProp name="ThreadGroup.num_threads">10</intProp>
+        <intProp name="ThreadGroup.ramp_time">5</intProp>
+        <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller">
+          <stringProp name="LoopController.loops">3</stringProp>
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+        </elementProp>
+      </ThreadGroup>
+      <hashTree>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="HTTP Request">
+          <stringProp name="HTTPSampler.domain">localhost</stringProp>
+          <stringProp name="HTTPSampler.port">11434</stringProp>
+          <stringProp name="HTTPSampler.protocol">http</stringProp>
+          <stringProp name="HTTPSampler.path">/api/chat</stringProp>
+          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+          <stringProp name="HTTPSampler.method">POST</stringProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">{&#xd;
+  &quot;model&quot;: &quot;tinyllama&quot;,&#xd;
+  &quot;messages&quot;: [&#xd;
+    {&#xd;
+      &quot;role&quot;: &quot;user&quot;,&#xd;
+      &quot;content&quot;: &quot;Explain load testing in 10 words.&quot;&#xd;
+    }&#xd;
+  ],&#xd;
+  &quot;stream&quot;: false,&#xd;
+  &quot;options&quot;: {&#xd;
+    &quot;num_predict&quot;: 30,&#xd;
+    &quot;temperature&quot;: 0.1&#xd;
+  }&#xd;
+}&#xd;
+</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+          <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="HTTP Header Manager">
+            <collectionProp name="HeaderManager.headers">
+              <elementProp name="" elementType="Header">
+                <stringProp name="Header.name">Content-Type</stringProp>
+                <stringProp name="Header.value">application/json</stringProp>
+              </elementProp>
+            </collectionProp>
+          </HeaderManager>
+          <hashTree/>
+          <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="JSR223 PostProcessor">
+            <stringProp name="cacheKey">true</stringProp>
+            <stringProp name="filename"></stringProp>
+            <stringProp name="parameters"></stringProp>
+            <stringProp name="script">import groovy.json.JsonSlurper
+
+// Cross-check: JMeter&apos;s own measured time
+long jmeterTime_ms = prev.getTime()
+
+// Parse Ollama response
+def response = prev.getResponseDataAsString()
+def json = new JsonSlurper().parseText(response)
+
+// Raw Ollama timing fields (nanoseconds)
+def totalDuration   = json.total_duration       as long
+def loadDuration    = json.load_duration        as long
+def promptEvalDur   = json.prompt_eval_duration as long
+def evalDuration    = json.eval_duration        as long
+def evalCount       = json.eval_count           as long
+def promptEvalCount = json.prompt_eval_count    as long
+
+// LLM KPIs
+double ttft_ms           = promptEvalDur / 1_000_000.0
+double tpot_ms           = (evalCount &gt; 0) ? (evalDuration / 1_000_000.0) / evalCount : 0.0
+double tokensPerSecond   = (evalDuration &gt; 0) ? evalCount / (evalDuration / 1_000_000_000.0) : 0.0
+double inferenceTime_ms  = (totalDuration - loadDuration) / 1_000_000.0
+double totalTime_ms      = totalDuration / 1_000_000.0
+
+// Stuck inference detection
+def content    = json?.message?.content ?: &quot;&quot;
+def doneReason = json?.done_reason ?: &quot;unknown&quot;
+def isStuck    = false
+def stuckReason = &quot;none&quot;
+
+if (content.matches(&quot;.*[\\u0000-\\u001F]{5,}.*&quot;)) {
+    isStuck = true
+    stuckReason = &quot;control_character_loop&quot;
+}
+if (content.matches(&quot;.*(.)\\1{10,}.*&quot;)) {
+    isStuck = true
+    stuckReason = &quot;character_repetition&quot;
+}
+if (doneReason == &quot;length&quot; &amp;&amp; content.replaceAll(&quot;[^a-zA-Z0-9 ]&quot;, &quot;&quot;).length() &lt; 5) {
+    isStuck = true
+    stuckReason = &quot;length_limit_no_content&quot;
+}
+
+// Mark sample as failed if stuck
+if (isStuck) {
+    prev.setSuccessful(false)
+    prev.setResponseMessage(&quot;STUCK_INFERENCE: &quot; + stuckReason)
+}
+
+// Store as JMeter variables
+vars.put(&quot;ttft_ms&quot;,           String.format(&quot;%.2f&quot;, ttft_ms))
+vars.put(&quot;tpot_ms&quot;,           String.format(&quot;%.2f&quot;, tpot_ms))
+vars.put(&quot;tokens_per_second&quot;, String.format(&quot;%.2f&quot;, tokensPerSecond))
+vars.put(&quot;inference_time_ms&quot;, String.format(&quot;%.2f&quot;, inferenceTime_ms))
+vars.put(&quot;total_time_ms&quot;,     String.format(&quot;%.2f&quot;, totalTime_ms))
+vars.put(&quot;eval_count&quot;,        String.valueOf(evalCount))
+vars.put(&quot;prompt_eval_count&quot;, String.valueOf(promptEvalCount))
+vars.put(&quot;is_stuck&quot;,          String.valueOf(isStuck))
+vars.put(&quot;stuck_reason&quot;,      stuckReason)
+
+// Log metrics
+log.info(&quot;=== LLM METRICS ===&quot;)
+log.info(&quot;TTFT (approx):    &quot; + String.format(&quot;%.2f&quot;, ttft_ms)          + &quot; ms&quot;)
+log.info(&quot;TPOT:             &quot; + String.format(&quot;%.2f&quot;, tpot_ms)          + &quot; ms/token&quot;)
+log.info(&quot;Tokens/sec:       &quot; + String.format(&quot;%.2f&quot;, tokensPerSecond)  + &quot; t/s&quot;)
+log.info(&quot;Inference time:   &quot; + String.format(&quot;%.2f&quot;, inferenceTime_ms) + &quot; ms&quot;)
+log.info(&quot;Total (Ollama):   &quot; + String.format(&quot;%.2f&quot;, totalTime_ms)     + &quot; ms&quot;)
+log.info(&quot;Total (JMeter):   &quot; + jmeterTime_ms                           + &quot; ms&quot;)
+log.info(&quot;Output tokens:    &quot; + evalCount)
+log.info(&quot;Input tokens:     &quot; + promptEvalCount)
+log.info(&quot;Stuck inference:  &quot; + isStuck + &quot; (&quot; + stuckReason + &quot;)&quot;)
+log.info(&quot;===================&quot;)
+
+// Write directly to InfluxDB from Groovy
+def influxUrl = &quot;http://localhost:8087/write?db=llm_perf&quot;
+def timestamp = System.currentTimeMillis() * 1000000 // nanoseconds
+
+def lineProtocol = &quot;llm_metrics,&quot; +
+    &quot;application=llm_test &quot; +
+    &quot;ttft_ms=${ttft_ms},&quot; +
+    &quot;tpot_ms=${tpot_ms},&quot; +
+    &quot;tokens_per_second=${tokensPerSecond},&quot; +
+    &quot;inference_time_ms=${inferenceTime_ms},&quot; +
+    &quot;is_stuck=${isStuck ? 1 : 0} &quot; +
+    &quot;${timestamp}&quot;
+
+def post = new URL(influxUrl).openConnection()
+post.setRequestMethod(&quot;POST&quot;)
+post.setDoOutput(true)
+post.getOutputStream().write(lineProtocol.getBytes(&quot;UTF-8&quot;))
+post.getResponseCode()
+
+log.info(&quot;Custom metrics pushed to InfluxDB&quot;)</stringProp>
+            <stringProp name="scriptLanguage">groovy</stringProp>
+          </JSR223PostProcessor>
+          <hashTree/>
+          <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="Response Assertion">
+            <collectionProp name="Asserion.test_strings">
+              <stringProp name="-1551555733">\u001c</stringProp>
+            </collectionProp>
+            <stringProp name="Assertion.custom_message">Stuck inference loop detected : repetitive control characters found</stringProp>
+            <stringProp name="Assertion.test_field">Assertion.response_data</stringProp>
+            <boolProp name="Assertion.assume_success">false</boolProp>
+            <intProp name="Assertion.test_type">6</intProp>
+          </ResponseAssertion>
+          <hashTree/>
+        </hashTree>
+        <ResultCollector guiclass="ViewResultsFullVisualizer" testclass="ResultCollector" testname="View Results Tree">
+          <boolProp name="ResultCollector.error_logging">false</boolProp>
+          <objProp>
+            <name>saveConfig</name>
+            <value class="SampleSaveConfiguration">
+              <time>true</time>
+              <latency>true</latency>
+              <timestamp>true</timestamp>
+              <success>true</success>
+              <label>true</label>
+              <code>true</code>
+              <message>true</message>
+              <threadName>true</threadName>
+              <dataType>true</dataType>
+              <encoding>false</encoding>
+              <assertions>true</assertions>
+              <subresults>true</subresults>
+              <responseData>false</responseData>
+              <samplerData>false</samplerData>
+              <xml>false</xml>
+              <fieldNames>true</fieldNames>
+              <responseHeaders>false</responseHeaders>
+              <requestHeaders>false</requestHeaders>
+              <responseDataOnError>false</responseDataOnError>
+              <saveAssertionResultsFailureMessage>true</saveAssertionResultsFailureMessage>
+              <assertionsResultsToSave>0</assertionsResultsToSave>
+              <bytes>true</bytes>
+              <sentBytes>true</sentBytes>
+              <url>true</url>
+              <threadCounts>true</threadCounts>
+              <idleTime>true</idleTime>
+              <connectTime>true</connectTime>
+            </value>
+          </objProp>
+          <stringProp name="filename"></stringProp>
+        </ResultCollector>
+        <hashTree/>
+      </hashTree>
+      <BackendListener guiclass="BackendListenerGui" testclass="BackendListener" testname="Backend Listener">
+        <elementProp name="arguments" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments">
+          <collectionProp name="Arguments.arguments">
+            <elementProp name="influxdbMetricsSender" elementType="Argument">
+              <stringProp name="Argument.name">influxdbMetricsSender</stringProp>
+              <stringProp name="Argument.value">org.apache.jmeter.visualizers.backend.influxdb.HttpMetricsSender</stringProp>
+              <stringProp name="Argument.metadata">=</stringProp>
+            </elementProp>
+            <elementProp name="influxdbUrl" elementType="Argument">
+              <stringProp name="Argument.name">influxdbUrl</stringProp>
+              <stringProp name="Argument.value">http://localhost:8087/write?db=llm_perf</stringProp>
+              <stringProp name="Argument.metadata">=</stringProp>
+            </elementProp>
+            <elementProp name="application" elementType="Argument">
+              <stringProp name="Argument.name">application</stringProp>
+              <stringProp name="Argument.value">llm_test</stringProp>
+              <stringProp name="Argument.metadata">=</stringProp>
+            </elementProp>
+            <elementProp name="measurement" elementType="Argument">
+              <stringProp name="Argument.name">measurement</stringProp>
+              <stringProp name="Argument.value">jmeter</stringProp>
+              <stringProp name="Argument.metadata">=</stringProp>
+            </elementProp>
+            <elementProp name="summaryOnly" elementType="Argument">
+              <stringProp name="Argument.name">summaryOnly</stringProp>
+              <stringProp name="Argument.value">false</stringProp>
+              <stringProp name="Argument.metadata">=</stringProp>
+            </elementProp>
+            <elementProp name="samplersRegex" elementType="Argument">
+              <stringProp name="Argument.name">samplersRegex</stringProp>
+              <stringProp name="Argument.value">.*</stringProp>
+              <stringProp name="Argument.metadata">=</stringProp>
+            </elementProp>
+            <elementProp name="percentiles" elementType="Argument">
+              <stringProp name="Argument.name">percentiles</stringProp>
+              <stringProp name="Argument.value">90;95;99</stringProp>
+              <stringProp name="Argument.metadata">=</stringProp>
+            </elementProp>
+            <elementProp name="testTitle" elementType="Argument">
+              <stringProp name="Argument.name">testTitle</stringProp>
+              <stringProp name="Argument.value">Test name</stringProp>
+              <stringProp name="Argument.metadata">=</stringProp>
+            </elementProp>
+            <elementProp name="eventTags" elementType="Argument">
+              <stringProp name="Argument.name">eventTags</stringProp>
+              <stringProp name="Argument.value"></stringProp>
+              <stringProp name="Argument.metadata">=</stringProp>
+            </elementProp>
+          </collectionProp>
+        </elementProp>
+        <stringProp name="classname">org.apache.jmeter.visualizers.backend.influxdb.InfluxdbBackendListenerClient</stringProp>
+      </BackendListener>
+      <hashTree/>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>
